@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Car Share Stats Map with Inputs</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+<style>
+  html, body, #map {
+    height: 100%; margin: 0; padding: 0;
+  }
+  #map { width: 100%; }
+
+  /* Container for inputs */
+  #input-container {
+    position: absolute;
+    bottom: 25px;
+    right: 10px;
+    background: white;
+    padding: 10px 12px;
+    box-shadow: 0 0 8px rgba(0,0,0,0.3);
+    border-radius: 5px;
+    font-family: Arial, sans-serif;
+    font-size: 14px;
+    z-index: 1000;
+  }
+  #input-container label {
+    display: block;
+    margin-bottom: 6px;
+  }
+  #input-container input {
+    width: 150px;
+    margin-bottom: 10px;
+    padding: 4px 6px;
+    box-sizing: border-box;
+  }
+  #odds-display {
+    font-weight: bold;
+    margin-top: 6px;
+  }
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div id="input-container">
+  <label>
+    Start Time (HH:MM:SS):
+    <input type="time" id="start-time" value="08:00:00" step="1" />
+  </label>
+  <label>
+    End Time (HH:MM:SS):
+    <input type="time" id="end-time" value="09:00:00" step="1" />
+  </label>
+  <label>
+    Radius (km):
+    <input type="number" id="radius" min="0.1" max="10" step="0.1" value="1" />
+  </label>
+  <div id="odds-display">Odds: N/A</div>
+</div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+<script>
+  const map = L.map('map').setView([44.9778, -93.2650], 13);
+
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '© OpenStreetMap contributors'
+  }).addTo(map);
+
+  const marker = L.marker([44.9778, -93.2650], { draggable: true }).addTo(map);
+
+  const startTimeInput = document.getElementById('start-time');
+  const endTimeInput = document.getElementById('end-time');
+  const radiusInput = document.getElementById('radius');
+  const oddsDisplay = document.getElementById('odds-display');
+
+  // Create the circle initially
+  let circle = L.circle(marker.getLatLng(), {
+    radius: parseFloat(radiusInput.value) * 1000, // meters
+    color: 'blue',
+    fillColor: '#3f9fff',
+    fillOpacity: 0.2,
+  }).addTo(map);
+
+  function updateCircle() {
+    const position = marker.getLatLng();
+    const radiusMeters = parseFloat(radiusInput.value) * 1000;
+
+    circle.setLatLng(position);
+    circle.setRadius(radiusMeters);
+  }
+
+  // Update circle on marker drag or radius change
+  marker.on('drag', updateCircle);
+  radiusInput.addEventListener('input', updateCircle);
+
+  // Initial draw
+  updateCircle();
+
+  function fetchOdds() {
+    const position = marker.getLatLng();
+    const start = startTimeInput.value || '08:00:00';
+    const end = endTimeInput.value || '09:00:00';
+    const radius = parseFloat(radiusInput.value) || 1;
+
+    const url = `http://localhost:3000/api/odds?lat=${position.lat}&lon=${position.lng}&start=${start}&end=${end}&radius=${radius}`;
+
+    oddsDisplay.textContent = 'Loading...';
+
+    fetch(url)
+      .then(response => response.json())
+      .then(data => {
+        if (data.odds !== undefined) {
+          oddsDisplay.textContent = `Odds: ${(data.odds * 100).toFixed(1)}%`;
+        } else {
+          oddsDisplay.textContent = 'Odds: Error';
+        }
+      })
+      .catch(err => {
+        console.error('Fetch error:', err);
+        oddsDisplay.textContent = 'Odds: Error';
+      });
+  }
+
+  // Fetch odds when marker moves or inputs change
+  marker.on('dragend', fetchOdds);
+  startTimeInput.addEventListener('change', fetchOdds);
+  endTimeInput.addEventListener('change', fetchOdds);
+  radiusInput.addEventListener('input', fetchOdds);
+
+  // Initial fetch
+  fetchOdds();
+</script>
+
+</body>
+</html>

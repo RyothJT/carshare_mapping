@@ -1,0 +1,3 @@
+selenium
+geopy
+opencv-python-headless
