@@ -98,6 +98,9 @@
   // Initial draw
   updateCircle();
 
+    // Keep track of event circles
+  let eventCircles = [];
+
   function fetchOdds() {
     const position = marker.getLatLng();
     const start = startTimeInput.value || '08:00:00';
@@ -116,12 +119,74 @@
         } else {
           oddsDisplay.textContent = 'Odds: Error';
         }
+        return data;
+      })
+      .then(data => {
+        // Clear old circles/labels
+        eventCircles.forEach(c => map.removeLayer(c));
+        eventCircles = [];
+
+        if (data.collapsedEvents !== undefined) {
+          // Group by lat/lon
+          const groups = {};
+          data.collapsedEvents.forEach(event => {
+            const key = `${event.lat.toFixed(6)},${event.lon.toFixed(6)}`;
+            if (!groups[key]) {
+              groups[key] = { lat: event.lat, lon: event.lon, count: 0, events: [] };
+            }
+            groups[key].count++;
+            groups[key].events.push(event);
+          });
+
+          // Draw circle + number label for each group
+          Object.values(groups).forEach(group => {
+            // Circle radius scales with count
+            const radius = 5 + group.count * 3;
+
+            // Always draw the circle
+            const c = L.circle([group.lat, group.lon], {
+              radius: radius,
+              color: 'orange',
+              opacity: 0.8,
+              fillOpacity: 0.3
+            }).addTo(map);
+
+            eventCircles.push(c);
+
+            // Only draw a label if >1 cars
+            if (group.count > 5) {
+              const fontSize = Math.max(12, radius / 2);
+              const iconSize = [radius, radius];
+              const iconAnchor = [radius / 2, radius / 2];
+
+              const label = L.marker([group.lat, group.lon], {
+                icon: L.divIcon({
+                  className: 'event-label',
+                  html: `<div style="
+                            font-weight:bold;
+                            color:black;
+                            font-size:${fontSize}px;
+                            text-align:center;
+                            line-height:${radius}px;
+                            text-shadow:1px 1px 2px white;
+                        ">${group.count}</div>`,
+                  iconSize: iconSize,
+                  iconAnchor: iconAnchor
+                }),
+                interactive: false
+              }).addTo(map);
+
+              eventCircles.push(label);
+            }
+          });
+        }
       })
       .catch(err => {
         console.error('Fetch error:', err);
         oddsDisplay.textContent = 'Odds: Error';
       });
   }
+
 
   // Fetch odds when marker moves or inputs change
   marker.on('dragend', fetchOdds);

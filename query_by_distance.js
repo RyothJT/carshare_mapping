@@ -110,6 +110,38 @@ function getRowsBetweenTimes(lat, lon, maxDistanceKm, timeRange) {
     return rows;
 }
 
+function getAllTimestamps(db, timeRange) {
+    let allTimestamps = [];
+
+    if (timeRange.start <= timeRange.end) {
+        const stmt = db.prepare(`
+            SELECT DISTINCT timestamp
+            FROM car_coordinates
+            WHERE TIME(timestamp) BETWEEN ? AND ?
+            ORDER BY timestamp;
+        `);
+        allTimestamps = stmt.all(timeRange.start, timeRange.end)
+                            .map(r => r.timestamp);
+    } else {
+        const stmt1 = db.prepare(`
+            SELECT DISTINCT timestamp
+            FROM car_coordinates
+            WHERE TIME(timestamp) >= ?
+        `);
+        const stmt2 = db.prepare(`
+            SELECT DISTINCT timestamp
+            FROM car_coordinates
+            WHERE TIME(timestamp) <= ?
+        `);
+        const ts1 = stmt1.all(timeRange.start).map(r => r.timestamp);
+        const ts2 = stmt2.all(timeRange.end).map(r => r.timestamp);
+        allTimestamps = ts1.concat(ts2);
+    }
+
+    return allTimestamps;
+}
+
+
 function calculateOddsOfCarNearby(lat, lon, maxDistanceKm, timeRange) {
     const margin = maxDistanceKm / 111;
 
@@ -126,28 +158,7 @@ function calculateOddsOfCarNearby(lat, lon, maxDistanceKm, timeRange) {
     }
 
     // Fetch all unique timestamps in the time range (handle midnight crossing)
-    let allTimestamps = [];
-    if (timeRange.start <= timeRange.end) {
-        const uniqueTimestampsStmt = db.prepare(`
-        SELECT DISTINCT timestamp FROM car_coordinates
-        WHERE time(timestamp) BETWEEN ? AND ?
-        ORDER BY timestamp
-        `);
-        allTimestamps = uniqueTimestampsStmt.all(timeRange.start, timeRange.end)
-        .map(r => r.timestamp);
-    } else {
-        const uniqueTimestampsStmt1 = db.prepare(`
-        SELECT DISTINCT timestamp FROM car_coordinates
-        WHERE time(timestamp) >= ?
-        `);
-        const uniqueTimestampsStmt2 = db.prepare(`
-        SELECT DISTINCT timestamp FROM car_coordinates
-        WHERE time(timestamp) <= ?
-        `);
-        const ts1 = uniqueTimestampsStmt1.all(timeRange.start).map(r => r.timestamp);
-        const ts2 = uniqueTimestampsStmt2.all(timeRange.end).map(r => r.timestamp);
-        allTimestamps = ts1.concat(ts2);
-    }
+    let allTimestamps = getAllTimestamps(db, timeRange);
 
     if (allTimestamps.length === 0) return 0;
 
@@ -178,29 +189,7 @@ function calculateOddsOfCarRadar(lat, lon, maxDistanceKm, timeRange) {
     }
 
     // Fetch all unique timestamps in the time range (handle midnight crossing)
-    let allTimestamps = [];
-    if (timeRange.start <= timeRange.end) {
-        const uniqueTimestampsStmt = db.prepare(`
-        SELECT DISTINCT timestamp
-        FROM car_coordinates
-        WHERE TIME(timestamp) BETWEEN ? AND ?
-        ORDER BY timestamp;
-        `);
-        allTimestamps = uniqueTimestampsStmt.all(timeRange.start, timeRange.end)
-        .map(r => r.timestamp);
-    } else {
-        const uniqueTimestampsStmt1 = db.prepare(`
-        SELECT DISTINCT timestamp FROM car_coordinates
-        WHERE time(timestamp) >= ?
-        `);
-        const uniqueTimestampsStmt2 = db.prepare(`
-        SELECT DISTINCT timestamp FROM car_coordinates
-        WHERE time(timestamp) <= ?
-        `);
-        const ts1 = uniqueTimestampsStmt1.all(timeRange.start).map(r => r.timestamp);
-        const ts2 = uniqueTimestampsStmt2.all(timeRange.end).map(r => r.timestamp);
-        allTimestamps = ts1.concat(ts2);
-    }
+    let allTimestamps = getAllTimestamps(db, timeRange);
 
     if (allTimestamps.length === 0) return 0;
 
@@ -216,10 +205,10 @@ function calculateOddsOfCarRadar(lat, lon, maxDistanceKm, timeRange) {
         daysMap.get(day).push(ts);
     }
 
-    // Filter to only include complete days
-    const completeDaysMap = new Map();
+    // Iterate over a copy of the keys so we can delete while looping
+    for (const day of Array.from(daysMap.keys())) {
+        const timestamps = daysMap.get(day);
 
-    for (const [day, timestamps] of daysMap.entries()) {
         // Sort timestamps ascending
         timestamps.sort((a, b) => a - b);
 
@@ -229,30 +218,73 @@ function calculateOddsOfCarRadar(lat, lon, maxDistanceKm, timeRange) {
 
         const expectedCount = Math.abs(endDate.getTime() - startDate.getTime()) / 1000 / 30 + 1;
 
-        if (timestamps.length === expectedCount) {
-            completeDaysMap.set(day, timestamps);
+        if (timestamps.length !== expectedCount) {
+            daysMap.delete(day); // remove incomplete day
         }
     }
 
-    let countWithCar = 0;
     let totalDays = 0;
+    let radarFound = 0;
+    const carsOnValidDays = []; // collect all cars within maxDistanceKm on valid days
 
-    for (const [day, timestamps] of completeDaysMap) {
+    for (const [day, timestamps] of daysMap) { // daysMap already contains only complete days
         totalDays++;
         let carFound = false;
 
         for (const ts of timestamps) {
             const cars = carsByTimestamp.get(ts) || [];
-            if (cars.some(car => haversineDistance(lat, lon, car.lat, car.lon) <= maxDistanceKm)) {
+
+            // Get cars within maxDistanceKm
+            const nearbyCars = cars.filter(car => haversineDistance(lat, lon, car.lat, car.lon) <= maxDistanceKm);
+
+            if (nearbyCars.length > 0) {
                 carFound = true;
-                break;
+                carsOnValidDays.push(...nearbyCars); // collect for mapping or further processing
+                // break; // optional: stop after first timestamp with cars
             }
         }
 
-        if (carFound) countWithCar++;
+        if (carFound) radarFound++;
     }
 
-    return countWithCar / totalDays;
+    const carsByIdentity = new Map();
+
+    for (const car of carsOnValidDays) {
+        const key = `${car.lat},${car.lon}`; // or use car.id if available
+        if (!carsByIdentity.has(key)) carsByIdentity.set(key, []);
+        carsByIdentity.get(key).push(car); // rows are already in timestamp order
+    }
+
+    const collapsedEvents = [];
+    const lastSeen = new Map(); // key: lat,lon; value: last timestamp added
+
+    // Sort first by timestamp
+    carsOnValidDays.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+    for (const car of carsOnValidDays) {
+        const key = `${car.lat},${car.lon}`;
+        const ts = new Date(car.timestamp);
+
+        const lastTs = lastSeen.get(key);
+
+        if (ts === lastTs) {
+            continue;
+        }
+
+        if (lastTs && ts - lastTs === 30_000) {
+            // consecutive, skip
+            lastSeen.set(key, ts); // update last seen timestamp
+            continue;
+        }
+
+        // New event
+        collapsedEvents.push(car);
+        lastSeen.set(key, ts);
+    }
+
+    odds =  radarFound / totalDays;
+
+    return { odds, collapsedEvents }; // wrap in an object
 }
 
 const express = require('express');
@@ -272,11 +304,11 @@ app.get('/api/odds', (req, res) => {
         return res.status(400).json({ error: 'Invalid lat/lon' });
     }
 
-    const odds = calculateOddsOfCarRadar(lat, lon, maxDistanceKm, { start, end });
-    res.json({ odds });
+    const result = calculateOddsOfCarRadar(lat, lon, maxDistanceKm, { start, end });
+    
+    // Send both odds and collapsed events
+    res.json(result);
 });
-
-// Replace with your actual odds calculation function here
 
 app.listen(3000, () => {
     console.log('API server running on http://localhost:3000');
